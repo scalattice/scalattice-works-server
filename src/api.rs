@@ -96,7 +96,7 @@ fn grant_for(state: &AppState, user: &User, sandbox_id: &str) -> Result<Grant, A
         .ok_or_else(|| err(StatusCode::FORBIDDEN, "no access to this sandbox"))
 }
 
-pub fn router(state: AppState) -> Router {
+pub fn router() -> Router<AppState> {
     Router::new()
         .route("/.well-known/works.json", get(well_known))
         .route("/health", get(health))
@@ -113,7 +113,6 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/sandboxes/:id/tree", get(tree))
         .route("/v1/sandboxes/:id/file", get(get_file).put(put_file).delete(del_file))
         .route("/v1/term/:id", get(term_ws))
-        .with_state(state)
 }
 
 #[derive(Serialize)]

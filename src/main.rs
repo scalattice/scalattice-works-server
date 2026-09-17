@@ -2,6 +2,7 @@ mod api;
 mod db;
 mod fsops;
 mod pty;
+mod ui;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -51,6 +52,8 @@ pub struct AppState {
     pub data_dir: PathBuf,
     pub org_name: String,
     pub personal: bool,
+    pub ui_origin: Option<String>,
+    pub ui_client: Option<reqwest::Client>,
 }
 
 #[derive(Parser, Debug)]
@@ -77,6 +80,12 @@ struct Args {
     /// Extra CORS origins, comma-separated
     #[arg(long, env = "WORKS_CORS", default_value = "")]
     cors: String,
+    /// Origin of the hosted SPA to proxy (same origin as this API in the browser)
+    #[arg(long, env = "WORKS_UI_ORIGIN", default_value = "https://works.scalattice.com")]
+    ui_origin: String,
+    /// Do not proxy the UI; API routes only
+    #[arg(long, env = "WORKS_API_ONLY")]
+    api_only: bool,
 }
 
 fn data_dir(personal: bool, override_path: Option<PathBuf>) -> PathBuf {
@@ -111,12 +120,25 @@ async fn main() {
             }
         }
     }
+    let serve_ui = !args.api_only && !args.ui_origin.is_empty();
+    let ui_client = if serve_ui {
+        Some(
+            reqwest::Client::builder()
+                .user_agent("works-server-ui")
+                .build()
+                .expect("ui client"),
+        )
+    } else {
+        None
+    };
     let state = AppState {
         db: Arc::new(db),
         pty: Arc::new(PtyHub::default()),
         data_dir: data.clone(),
         org_name: args.name,
         personal: args.personal,
+        ui_origin: serve_ui.then_some(args.ui_origin.trim_end_matches('/').to_string()),
+        ui_client,
     };
 
     let mut origins = vec![
@@ -148,12 +170,31 @@ async fn main() {
             .allow_headers(Any)
     };
 
-    let app = api::router(state)
+    let mut app = api::router();
+    if state.ui_origin.is_some() {
+        app = app.fallback(ui::fallback);
+    }
+    let app = app
         .layer(cors)
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http())
+        .with_state(state.clone());
 
     let addr: SocketAddr = args.bind.parse().expect("bind address");
-    tracing::info!(%addr, personal = args.personal, data = %data.display(), "works-server");
+    tracing::info!(
+        %addr,
+        personal = args.personal,
+        data = %data.display(),
+        ui = state.ui_origin.as_deref().unwrap_or("-"),
+        "works-server"
+    );
+    if let Some(ui) = state.ui_origin.as_deref() {
+        let open = if addr.ip().is_loopback() || addr.ip().is_unspecified() {
+            format!("http://127.0.0.1:{}", addr.port())
+        } else {
+            format!("http://{addr}")
+        };
+        tracing::info!("open {open} in a browser (UI proxied from {ui})");
+    }
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind");
     axum::serve(listener, app).await.expect("serve");
 }
