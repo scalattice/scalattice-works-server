@@ -11,7 +11,7 @@ A public tab at `works.scalattice.com` **cannot** call `localhost` (browsers blo
 works-server --personal --bind 127.0.0.1:8787
 
 # Company install — bind on the LAN / public interface, data on disk you control
-works-server --bind 0.0.0.0:8787 --data /var/lib/works --name "Acme"
+works-server --bind 0.0.0.0:8787 --data /var/lib/scalattice-works --name "Acme"
 ```
 
 First visit: `GET /.well-known/works.json` returns `setup_required: true`. The Connect screen creates the first **admin**. That admin’s dashboard can:

@@ -5,7 +5,7 @@ mod pty;
 mod ui;
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
@@ -94,13 +94,60 @@ fn data_dir(personal: bool, override_path: Option<PathBuf>) -> PathBuf {
     }
     if personal {
         if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(".local/share/works");
+            return PathBuf::from(home).join(".local/share/scalattice-works");
         }
         if let Some(profile) = std::env::var_os("USERPROFILE") {
-            return PathBuf::from(profile).join("AppData/Local/Works");
+            return PathBuf::from(profile).join("AppData/Local/ScalatticeWorks");
         }
     }
-    PathBuf::from("/var/lib/works")
+    PathBuf::from("/var/lib/scalattice-works")
+}
+
+fn legacy_data_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(PathBuf::from(home).join(".local/share/works"));
+    }
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        dirs.push(PathBuf::from(profile).join("AppData/Local/Works"));
+    }
+    dirs.push(PathBuf::from("/var/lib/works"));
+    dirs
+}
+
+fn adopt_legacy_data_dir(dest: &Path) {
+    if dest.join("works.sqlite").exists() {
+        return;
+    }
+    for old in legacy_data_dirs() {
+        if old == dest || !old.exists() {
+            continue;
+        }
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::rename(&old, dest).is_ok() {
+            tracing::info!(from = %old.display(), to = %dest.display(), "moved data dir");
+            return;
+        }
+    }
+}
+
+fn rewrite_legacy_sandbox_paths(db: &Db, dest: &Path) {
+    let Ok(boxes) = db.sandboxes() else { return };
+    let dest_s = dest.to_string_lossy();
+    for box_ in boxes {
+        for old in legacy_data_dirs() {
+            let old_s = old.to_string_lossy();
+            if box_.path == old_s || box_.path.starts_with(&format!("{old_s}/")) {
+                let rest = &box_.path[old_s.len()..];
+                let next = format!("{dest_s}{rest}");
+                if db.update_sandbox(&box_.id, None, Some(&next), None).is_ok() {
+                    tracing::info!(id = %box_.id, path = %next, "updated sandbox path");
+                }
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -110,9 +157,16 @@ async fn main() {
         .init();
 
     let args = Args::parse();
+    let custom_data = args.data.is_some();
     let data = data_dir(args.personal, args.data);
+    if !custom_data {
+        adopt_legacy_data_dir(&data);
+    }
     std::fs::create_dir_all(&data).expect("data dir");
     let db = Db::open(&data.join("works.sqlite")).expect("sqlite");
+    if !custom_data {
+        rewrite_legacy_sandbox_paths(&db, &data);
+    }
     if let (Some(user), Some(pass)) = (args.bootstrap_user.as_deref(), args.bootstrap_password.as_deref()) {
         if db.user_count().unwrap_or(0) == 0 {
             if let Err(e) = bootstrap_admin(&db, &data, user, pass, args.personal) {
